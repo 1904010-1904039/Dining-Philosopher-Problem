@@ -1,145 +1,211 @@
-import java.util.concurrent.*;
-import java.util.Random;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Random;
+import java.util.concurrent.locks.Lock;
+import java.util.concurrent.locks.ReentrantLock;
 
-class DiningPhilosophersSimulation {
-    private static final int NUM_TABLES = 6;
-    private static final int PHILOSOPHERS_PER_TABLE = 5;
-    private static final int TOTAL_PHILOSOPHERS = 25;
-    private static final long TIME_SCALE = 100; // Scale factor for time
+class Fork {
+    private final Lock lock = new ReentrantLock();
 
-    private static class Fork {
-        private final Semaphore semaphore = new Semaphore(1);
+    public boolean pickUp() {
+        return lock.tryLock();
+    }
 
-        public void pickup() throws InterruptedException {
-            semaphore.acquire();
-        }
+    public void putDown() {
+        lock.unlock();
+    }
+}
 
-        public void putdown() {
-            semaphore.release();
+class Table {
+    private final List<Fork> forks = new ArrayList<>();
+    private final List<Philosopher> philosophers = new ArrayList<>();
+    private boolean isDeadlocked = false;
+
+    public Table(int size) {
+        for (int i = 0; i < size; i++) {
+            forks.add(new Fork());
         }
     }
 
-    private static class Table {
-        private final Fork[] forks = new Fork[PHILOSOPHERS_PER_TABLE];
-        private final Semaphore[] seats = new Semaphore[PHILOSOPHERS_PER_TABLE];
-        private final CountDownLatch deadlockLatch = new CountDownLatch(PHILOSOPHERS_PER_TABLE);
+    public void addPhilosopher(Philosopher philosopher) {
+        philosophers.add(philosopher);
+    }
 
-        public Table() {
-            for (int i = 0; i < PHILOSOPHERS_PER_TABLE; i++) {
-                forks[i] = new Fork();
-                seats[i] = new Semaphore(1);
+    public Fork getLeftFork(int index) {
+        return forks.get(index);
+    }
+
+    public Fork getRightFork(int index) {
+        return forks.get((index + 1) % forks.size());
+    }
+
+    public void setDeadlocked(boolean deadlocked) {
+        isDeadlocked = deadlocked;
+    }
+
+    public boolean isDeadlocked() {
+        return isDeadlocked;
+    }
+
+    public boolean isFull() {
+        return philosophers.size() == forks.size();
+    }
+}
+
+class Philosopher implements Runnable {
+    private static final Random random = new Random();
+    private final String name;
+    private Table table;
+    private int seatIndex;
+    private final SimulationClock clock;
+
+    public Philosopher(String name, SimulationClock clock) {
+        this.name = name;
+        this.clock = clock;
+    }
+
+    public void setTable(Table table, int seatIndex) {
+        this.table = table;
+        this.seatIndex = seatIndex;
+    }
+
+    @Override
+    public void run() {
+        try {
+            while (!table.isDeadlocked()) {
+                think();
+                if (eat()) {
+                    putDownForks();
+                } else {
+                    // Deadlock detected, move to another table
+                    return;
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+
+    private void think() throws InterruptedException {
+        clock.sleep(random.nextInt(11));
+    }
+
+    private boolean eat() throws InterruptedException {
+        Fork leftFork = table.getLeftFork(seatIndex);
+        if (!leftFork.pickUp()) return false;
+
+        clock.sleep(4);
+
+        Fork rightFork = table.getRightFork(seatIndex);
+        if (!rightFork.pickUp()) {
+            leftFork.putDown();
+            return false;
+        }
+
+        clock.sleep(random.nextInt(6));
+        return true;
+    }
+
+    private void putDownForks() {
+        table.getLeftFork(seatIndex).putDown();
+        table.getRightFork(seatIndex).putDown();
+    }
+
+    public String getName() {
+        return name;
+    }
+}
+
+class SimulationClock {
+    private final boolean useRealTime;
+    private long simulatedTime = 0;
+
+    public SimulationClock(boolean useRealTime) {
+        this.useRealTime = useRealTime;
+    }
+
+    public void sleep(long seconds) throws InterruptedException {
+        if (useRealTime) {
+            Thread.sleep(seconds * 1000);
+        } else {
+            simulatedTime += seconds;
+        }
+    }
+
+    public long getTime() {
+        return useRealTime ? System.currentTimeMillis() / 1000 : simulatedTime;
+    }
+}
+
+public class DiningPhilosophersSimulation {
+    private static final int TABLE_SIZE = 5;
+    private static final int NUM_TABLES = 6;
+
+    public static void main(String[] args) {
+        SimulationClock clock = new SimulationClock(false);
+        List<Table> tables = new ArrayList<>();
+        List<Philosopher> philosophers = new ArrayList<>();
+
+        for (int i = 0; i < NUM_TABLES; i++) {
+            tables.add(new Table(TABLE_SIZE));
+        }
+
+        for (int i = 0; i < NUM_TABLES - 1; i++) {
+            for (int j = 0; j < TABLE_SIZE; j++) {
+                Philosopher philosopher = new Philosopher("P" + i + j, clock);
+                philosopher.setTable(tables.get(i), j);
+                tables.get(i).addPhilosopher(philosopher);
+                philosophers.add(philosopher);
             }
         }
-    }
 
-    private static class Philosopher implements Runnable {
-        private final char label;
-        private Table currentTable;
-        private int seatIndex;
-        private final Random random = new Random();
+        long startTime = clock.getTime();
+        List<Thread> threads = new ArrayList<>();
 
-        public Philosopher(char label, Table initialTable, int initialSeatIndex) {
-            this.label = label;
-            this.currentTable = initialTable;
-            this.seatIndex = initialSeatIndex;
+        for (Philosopher philosopher : philosophers) {
+            Thread t = new Thread(philosopher);
+            threads.add(t);
+            t.start();
         }
 
-        private void think() throws InterruptedException {
-            Thread.sleep(random.nextInt(11) * TIME_SCALE);
-        }
+        Philosopher lastMovedPhilosopher = null;
+        Table sixthTable = tables.get(NUM_TABLES - 1);
 
-        private void eat() throws InterruptedException {
-            Thread.sleep(random.nextInt(6) * TIME_SCALE);
-        }
-
-        @Override
-        public void run() {
-            try {
-                while (true) {
-                    think();
-
-                    // Try to pick up left fork
-                    currentTable.forks[seatIndex].pickup();
-
-                    // Wait 4 seconds before trying to pick up right fork
-                    Thread.sleep(4 * TIME_SCALE);
-
-                    // Try to pick up right fork
-                    int rightForkIndex = (seatIndex + 1) % PHILOSOPHERS_PER_TABLE;
-                    try {
-                        if (!currentTable.forks[rightForkIndex].semaphore.tryAcquire(1, TimeUnit.SECONDS)) {
-                            // Deadlock detected
-                            currentTable.forks[seatIndex].putdown();
-                            currentTable.deadlockLatch.countDown();
-                            moveToNewTable();
-                            continue;
-                        }
-                    } catch (InterruptedException e) {
-                        currentTable.forks[seatIndex].putdown();
-                        continue;
+        while (!sixthTable.isDeadlocked()) {
+            for (Table table : tables.subList(0, NUM_TABLES - 1)) {
+                if (table.isDeadlocked()) {
+                    Philosopher movingPhilosopher = table.philosophers.remove(0);
+                    if (!sixthTable.isFull()) {
+                        movingPhilosopher.setTable(sixthTable, sixthTable.philosophers.size());
+                        sixthTable.addPhilosopher(movingPhilosopher);
+                        lastMovedPhilosopher = movingPhilosopher;
+                        Thread newThread = new Thread(movingPhilosopher);
+                        threads.add(newThread);
+                        newThread.start();
                     }
-
-                    // Eat
-                    eat();
-
-                    // Put down forks
-                    currentTable.forks[seatIndex].putdown();
-                    currentTable.forks[rightForkIndex].putdown();
+                    table.setDeadlocked(false);
                 }
+            }
+
+            if (sixthTable.isFull()) {
+                sixthTable.setDeadlocked(true);
+            }
+
+            try {
+                clock.sleep(1);
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
             }
         }
 
-        private void moveToNewTable() throws InterruptedException {
-            currentTable.seats[seatIndex].release();
-            Table newTable = tables[NUM_TABLES - 1]; // Move to the last table
-            int newSeatIndex = random.nextInt(PHILOSOPHERS_PER_TABLE);
-            while (!newTable.seats[newSeatIndex].tryAcquire()) {
-                newSeatIndex = random.nextInt(PHILOSOPHERS_PER_TABLE);
-            }
-            currentTable = newTable;
-            seatIndex = newSeatIndex;
-        }
-    }
+        long endTime = clock.getTime();
 
-    private static final Table[] tables = new Table[NUM_TABLES];
-    private static final List<Philosopher> philosophers = new ArrayList<>();
-
-    public static void main(String[] args) throws InterruptedException {
-        // Initialize tables
-        for (int i = 0; i < NUM_TABLES; i++) {
-            tables[i] = new Table();
+        for (Thread t : threads) {
+            t.interrupt();
         }
 
-        // Create and start philosopher threads
-        ExecutorService executor = Executors.newFixedThreadPool(TOTAL_PHILOSOPHERS);
-        for (int i = 0; i < TOTAL_PHILOSOPHERS; i++) {
-            char label = (char) ('A' + i);
-            int tableIndex = i / PHILOSOPHERS_PER_TABLE;
-            int seatIndex = i % PHILOSOPHERS_PER_TABLE;
-            Philosopher philosopher = new Philosopher(label, tables[tableIndex], seatIndex);
-            philosophers.add(philosopher);
-            executor.execute(philosopher);
-        }
-
-        // Wait for the last table to deadlock
-        tables[NUM_TABLES - 1].deadlockLatch.await();
-
-        // Stop all threads
-        executor.shutdownNow();
-
-        // Find the last philosopher who moved to the sixth table
-        char lastMovedPhilosopher = 'A';
-        for (Philosopher philosopher : philosophers) {
-            if (philosopher.currentTable == tables[NUM_TABLES - 1]) {
-                lastMovedPhilosopher = philosopher.label;
-            }
-        }
-
-        System.out.println("Simulation complete.");
-        System.out.println("Last philosopher who moved to the sixth table: " + lastMovedPhilosopher);
+        System.out.println("Simulation completed in " + (endTime - startTime) + " seconds.");
+        System.out.println("Last philosopher who moved to the sixth table: " + 
+                           (lastMovedPhilosopher != null ? lastMovedPhilosopher.getName() : "None"));
     }
 }
